@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -127,8 +128,12 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 			return
 		}
 
-		if len(aiResp.FunctionCalls) == 0 {
+		// Capture text from AI (even when there are function calls)
+		if aiResp.Text != "" {
 			responseText = aiResp.Text
+		}
+
+		if len(aiResp.FunctionCalls) == 0 {
 			break
 		}
 
@@ -199,11 +204,8 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		// Add frontend-only calls to results
 		allToolResults = append(allToolResults, frontendCalls...)
 
-		// If we only had frontend calls (no backend), stop the loop
-		if len(backendCalls) == 0 {
-			break
-		}
-		// If we had backend calls, continue loop so Gemini can see results and respond
+		// Tool calls processed — stop the loop. Results go to frontend.
+		break
 	}
 
 	// Save assistant text response if any
@@ -216,6 +218,14 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		h.msgRepo.Create(ctx, assistantMsg)
 	}
 
+	// If AI returned tool_calls but no text, add a default message
+	if responseText == "" && len(allToolResults) > 0 {
+		responseText = defaultMessageForToolCall(allToolResults[0].Name)
+	}
+
+	// Clean up trailing/leading whitespace and newlines
+	responseText = strings.TrimSpace(responseText)
+
 	resp := chatResponse{
 		ConversationID: conv.ID,
 		Message:        responseText,
@@ -225,4 +235,17 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		resp.ToolCalls = []toolcall.Result{}
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func defaultMessageForToolCall(name string) string {
+	switch name {
+	case "select_mode":
+		return "¡Buenísimo! Continuemos con ese modo. Ahora decime, ¿cuáles son los medicamentos que estás tomando?"
+	case "normalize_medications":
+		return "Perfecto, encontré estos medicamentos. ¿Son correctos?"
+	case "check_interactions":
+		return "¡Dale! Esperame un segundito mientras analizo las interacciones entre tus medicamentos..."
+	default:
+		return ""
+	}
 }
