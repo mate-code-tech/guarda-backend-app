@@ -67,8 +67,9 @@ Los usuarios escriben con typos y nombres coloquiales. NO les pidas que corrijan
 - NUNCA mandes una función sin texto`
 
 type AIService struct {
-	client *genai.Client
-	model  *genai.GenerativeModel
+	client    *genai.Client
+	model     *genai.GenerativeModel // chat model with system prompt
+	utilModel *genai.GenerativeModel // utility model without system prompt
 }
 
 type AIResponse struct {
@@ -91,7 +92,10 @@ func NewAIService(ctx context.Context, apiKey string) (*AIService, error) {
 	model.SystemInstruction = genai.NewUserContent(genai.Text(systemPrompt))
 	model.Temperature = genai.Ptr[float32](0.3)
 
-	return &AIService{client: client, model: model}, nil
+	utilModel := client.GenerativeModel("gemini-3.1-flash-lite-preview")
+	utilModel.Temperature = genai.Ptr[float32](0.2)
+
+	return &AIService{client: client, model: model, utilModel: utilModel}, nil
 }
 
 func (s *AIService) SetTools(tools []*genai.Tool) {
@@ -184,7 +188,7 @@ Ejemplos de resolución:
 Respondé SOLAMENTE con el nombre genérico INN en inglés, en minúsculas, sin puntuación ni texto extra.
 Si no podés identificar el medicamento con certeza, respondé exactamente: UNKNOWN`, name)
 
-	resp, err := s.model.GenerateContent(ctx, genai.Text(prompt))
+	resp, err := s.utilModel.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
 		return "", err
 	}
@@ -198,10 +202,11 @@ Si no podés identificar el medicamento con certeza, respondé exactamente: UNKN
 
 func (s *AIService) CheckInteraction(ctx context.Context, drugA, drugB string) (*InteractionResult, error) {
 	prompt := fmt.Sprintf(`Analizá la interacción entre "%s" y "%s".
-Respondé SOLAMENTE con un JSON válido con este formato exacto (sin markdown ni texto extra):
-{"severity":"none|mild|moderate|severe","description":"descripción breve en español","recommendation":"recomendación en español"}`, drugA, drugB)
+Respondé SOLO con JSON válido, sin markdown ni texto extra.
+La description debe ser de 1 oración corta máximo. La recommendation de 1 oración corta máximo.
+{"severity":"none|mild|moderate|severe","description":"1 oración corta","recommendation":"1 oración corta"}`, drugA, drugB)
 
-	resp, err := s.model.GenerateContent(ctx, genai.Text(prompt))
+	resp, err := s.utilModel.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
 		return nil, err
 	}

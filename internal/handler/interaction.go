@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -20,8 +21,33 @@ func NewInteractionHandler(repo *repository.InteractionRepo, checker *service.In
 }
 
 type checkRequest struct {
-	ConversationID string   `json:"conversation_id" binding:"required"`
-	Medications    []string `json:"medications" binding:"required"`
+	ConversationID string          `json:"conversation_id" binding:"required"`
+	Medications    json.RawMessage `json:"medications" binding:"required"`
+}
+
+type medicationInput struct {
+	InputName   string `json:"input_name"`
+	GenericName string `json:"generic_name"`
+}
+
+func parseMedications(raw json.RawMessage) []medicationInput {
+	// Try as array of objects first
+	var meds []medicationInput
+	if err := json.Unmarshal(raw, &meds); err == nil && len(meds) > 0 && meds[0].GenericName != "" {
+		return meds
+	}
+
+	// Fallback: array of strings
+	var names []string
+	if err := json.Unmarshal(raw, &names); err == nil {
+		var result []medicationInput
+		for _, n := range names {
+			result = append(result, medicationInput{InputName: n, GenericName: n})
+		}
+		return result
+	}
+
+	return nil
 }
 
 func (h *InteractionHandler) Check(c *gin.Context) {
@@ -37,18 +63,28 @@ func (h *InteractionHandler) Check(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
-	var results []service.InteractionResult
+	meds := parseMedications(req.Medications)
+	if len(meds) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "medications required"})
+		return
+	}
 
-	// Check all pairs
-	for i := 0; i < len(req.Medications); i++ {
-		for j := i + 1; j < len(req.Medications); j++ {
-			result, err := h.checker.Check(ctx, req.Medications[i], req.Medications[j])
+	// Build lookup from generic_name → input_name
+	nameMap := make(map[string]string)
+	for _, m := range meds {
+		nameMap[m.GenericName] = m.InputName
+	}
+
+	ctx := c.Request.Context()
+	var results []interactionResponse
+
+	for i := 0; i < len(meds); i++ {
+		for j := i + 1; j < len(meds); j++ {
+			result, err := h.checker.Check(ctx, meds[i].GenericName, meds[j].GenericName)
 			if err != nil {
 				continue
 			}
 
-			// Save to DB
 			desc := result.Description
 			rec := result.Recommendation
 			interaction := &model.Interaction{
@@ -62,12 +98,32 @@ func (h *InteractionHandler) Check(c *gin.Context) {
 			}
 			h.repo.Create(ctx, interaction)
 
-			results = append(results, *result)
+			results = append(results, interactionResponse{
+				DrugA:          result.DrugA,
+				DrugB:          result.DrugB,
+				InputNameA:     nameMap[result.DrugA],
+				InputNameB:     nameMap[result.DrugB],
+				Severity:       result.Severity,
+				Description:    result.Description,
+				Recommendation: result.Recommendation,
+				Source:         result.Source,
+			})
 		}
 	}
 
 	if results == nil {
-		results = []service.InteractionResult{}
+		results = []interactionResponse{}
 	}
 	c.JSON(http.StatusOK, gin.H{"results": results})
+}
+
+type interactionResponse struct {
+	DrugA          string `json:"drug_a"`
+	DrugB          string `json:"drug_b"`
+	InputNameA     string `json:"input_name_a"`
+	InputNameB     string `json:"input_name_b"`
+	Severity       string `json:"severity"`
+	Description    string `json:"description"`
+	Recommendation string `json:"recommendation"`
+	Source         string `json:"source"`
 }

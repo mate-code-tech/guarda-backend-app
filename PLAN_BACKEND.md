@@ -274,11 +274,24 @@ El frontend recibe `check_interactions` → usa los meds que ya tiene del paso a
 
 #### `POST /api/v1/interactions/check` — Cruce de interacciones
 
-**Request:**
+Acepta medications como array de objetos (con nombre original + genérico) o como array de strings (fallback).
+
+**Request (con nombres originales — recomendado):**
 ```json
 {
   "conversation_id": "uuid",
-  "medications": ["acetaminophen", "hyoscine"]
+  "medications": [
+    { "input_name": "tafirol", "generic_name": "acetaminophen" },
+    { "input_name": "aspirineta", "generic_name": "aspirin" }
+  ]
+}
+```
+
+**Request (solo strings — fallback):**
+```json
+{
+  "conversation_id": "uuid",
+  "medications": ["acetaminophen", "aspirin"]
 }
 ```
 
@@ -288,11 +301,13 @@ El frontend recibe `check_interactions` → usa los meds que ya tiene del paso a
   "results": [
     {
       "drug_a": "acetaminophen",
-      "drug_b": "hyoscine",
-      "severity": "none",
-      "description": "No se encontraron interacciones conocidas.",
-      "recommendation": "Si tiene dudas, consulte con su médico.",
-      "source": "none"
+      "drug_b": "aspirin",
+      "input_name_a": "tafirol",
+      "input_name_b": "aspirineta",
+      "severity": "mild",
+      "description": "La combinación puede aumentar el riesgo de daño renal o hepático en uso prolongado.",
+      "recommendation": "Consulte a su médico antes de combinar estos fármacos de forma crónica.",
+      "source": "ai_fallback"
     }
   ]
 }
@@ -300,6 +315,7 @@ El frontend recibe `check_interactions` → usa los meds que ya tiene del paso a
 
 Severidades posibles: `none`, `mild`, `moderate`, `severe`.
 Sources posibles: `dataset`, `ai_fallback`, `none`.
+`input_name_a` / `input_name_b`: nombres originales que el usuario ingresó (para mostrar en el frontend).
 
 ---
 
