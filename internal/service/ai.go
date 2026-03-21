@@ -174,19 +174,10 @@ func parseGeminiResponse(resp *genai.GenerateContentResponse) *AIResponse {
 }
 
 func (s *AIService) NormalizeMedication(ctx context.Context, name string) (string, error) {
-	prompt := fmt.Sprintf(`Sos un experto farmacéutico. El usuario escribió "%s" refiriéndose a un medicamento.
-Puede tener typos, estar en español, ser una marca comercial argentina, o una abreviación informal.
-
-Ejemplos de resolución:
-- "tafiro" o "tafirol" → acetaminophen
-- "bayaspirina" o "aspi" → aspirin
-- "ibu" o "ibuprofeno" → ibuprofen
-- "buscapina" → hyoscine
-- "amoxidal" → amoxicillin
-- "rivotril" → clonazepam
-
-Respondé SOLAMENTE con el nombre genérico INN en inglés, en minúsculas, sin puntuación ni texto extra.
-Si no podés identificar el medicamento con certeza, respondé exactamente: UNKNOWN`, name)
+	prompt := fmt.Sprintf(`Medicamento: "%s"
+Devolvé SOLO el nombre genérico INN en inglés, minúsculas, una sola palabra o dos máximo.
+Ejemplos: tafirol→acetaminophen, aspirina→aspirin, ibuprofeno→ibuprofen, buscapina→hyoscine, omeprazol→omeprazole, amoxidal→amoxicillin
+Si no lo reconocés: UNKNOWN`, name)
 
 	resp, err := s.utilModel.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
@@ -201,10 +192,10 @@ Si no podés identificar el medicamento con certeza, respondé exactamente: UNKN
 }
 
 func (s *AIService) CheckInteraction(ctx context.Context, drugA, drugB string) (*InteractionResult, error) {
-	prompt := fmt.Sprintf(`Analizá la interacción entre "%s" y "%s".
-Respondé SOLO con JSON válido, sin markdown ni texto extra.
-La description debe ser de 1 oración corta máximo. La recommendation de 1 oración corta máximo.
-{"severity":"none|mild|moderate|severe","description":"1 oración corta","recommendation":"1 oración corta"}`, drugA, drugB)
+	prompt := fmt.Sprintf(`Interacción entre "%s" y "%s".
+SOLO JSON, sin markdown:
+{"severity":"none|mild|moderate|severe","description":"máximo 10 palabras en español","recommendation":"máximo 10 palabras en español"}
+Si no hay interacción real, severity es "none". No inventes riesgos que no existen. Sé preciso y breve.`, drugA, drugB)
 
 	resp, err := s.utilModel.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {

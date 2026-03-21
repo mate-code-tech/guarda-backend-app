@@ -26,16 +26,37 @@ func (r *RxNormClient) FindByName(ctx context.Context, name string) (string, err
 	// Try exact match first
 	generic, err := r.exactSearch(ctx, name)
 	if err == nil && generic != "" {
-		return strings.ToLower(generic), nil
+		return cleanDrugName(generic), nil
 	}
 
 	// Try approximate match
 	generic, err = r.approximateSearch(ctx, name)
 	if err == nil && generic != "" {
-		return strings.ToLower(generic), nil
+		return cleanDrugName(generic), nil
 	}
 
 	return "", fmt.Errorf("not found in RxNorm: %s", name)
+}
+
+// cleanDrugName extracts just the base drug name from RxNorm results
+// e.g. "aspirin 500 mg oral tablet [aspirina caplets]" → "aspirin"
+func cleanDrugName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	// Remove everything after first digit (dose info)
+	for i, c := range name {
+		if c >= '0' && c <= '9' {
+			name = strings.TrimSpace(name[:i])
+			break
+		}
+	}
+	// Remove everything in brackets
+	if idx := strings.Index(name, "["); idx > 0 {
+		name = strings.TrimSpace(name[:idx])
+	}
+	if idx := strings.Index(name, "("); idx > 0 {
+		name = strings.TrimSpace(name[:idx])
+	}
+	return name
 }
 
 func (r *RxNormClient) exactSearch(ctx context.Context, name string) (string, error) {
