@@ -60,12 +60,12 @@ func main() {
 	checker := service.NewInteractionChecker(interDataset, aiService)
 
 	// Initialize tool executor
-	executor := toolcall.NewExecutor(normalizer, checker)
+	executor := toolcall.NewExecutor(normalizer, checker, guestRepo)
 
 	// Initialize handlers
 	guestHandler := handler.NewGuestHandler(guestRepo)
 	chatHandler := handler.NewChatHandler(convRepo, msgRepo, aiService, executor)
-	interHandler := handler.NewInteractionHandler(interRepo, checker)
+	interHandler := handler.NewInteractionHandler(interRepo, checker, guestRepo)
 
 	// Setup router
 	r := gin.Default()

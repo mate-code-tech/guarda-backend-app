@@ -12,12 +12,13 @@ import (
 )
 
 type InteractionHandler struct {
-	repo    *repository.InteractionRepo
-	checker *service.InteractionChecker
+	repo      *repository.InteractionRepo
+	checker   *service.InteractionChecker
+	guestRepo *repository.GuestRepo
 }
 
-func NewInteractionHandler(repo *repository.InteractionRepo, checker *service.InteractionChecker) *InteractionHandler {
-	return &InteractionHandler{repo: repo, checker: checker}
+func NewInteractionHandler(repo *repository.InteractionRepo, checker *service.InteractionChecker, guestRepo *repository.GuestRepo) *InteractionHandler {
+	return &InteractionHandler{repo: repo, checker: checker, guestRepo: guestRepo}
 }
 
 type checkRequest struct {
@@ -51,6 +52,8 @@ func parseMedications(raw json.RawMessage) []medicationInput {
 }
 
 func (h *InteractionHandler) Check(c *gin.Context) {
+	guestID := c.MustGet("guest_id").(uuid.UUID)
+
 	var req checkRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -114,7 +117,47 @@ func (h *InteractionHandler) Check(c *gin.Context) {
 	if results == nil {
 		results = []interactionResponse{}
 	}
-	c.JSON(http.StatusOK, gin.H{"results": results})
+
+	// Load guest profile for profile-aware warnings
+	var profileWarnings []service.ProfileWarning
+	guest, err := h.guestRepo.GetByID(ctx, guestID)
+	if err == nil && guest != nil {
+		profile := buildProfileContext(guest)
+		if profile != nil {
+			genericNames := make([]string, len(meds))
+			for i, m := range meds {
+				genericNames[i] = m.GenericName
+			}
+			profileWarnings = h.checker.CheckProfileWarnings(ctx, genericNames, profile)
+		}
+	}
+	if profileWarnings == nil {
+		profileWarnings = []service.ProfileWarning{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"results":          results,
+		"profile_warnings": profileWarnings,
+	})
+}
+
+func buildProfileContext(guest *model.Guest) *service.ProfileContext {
+	profile := &service.ProfileContext{
+		IsForSelf: guest.IsForSelf,
+	}
+	if guest.Name != nil {
+		profile.Name = *guest.Name
+	}
+	if guest.Age != nil {
+		profile.Age = *guest.Age
+	}
+	if guest.Conditions != nil {
+		profile.Conditions = guest.Conditions
+	}
+	if guest.Allergies != nil {
+		profile.Allergies = guest.Allergies
+	}
+	return profile
 }
 
 type interactionResponse struct {

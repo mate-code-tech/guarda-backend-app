@@ -143,20 +143,14 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 
 		for _, fc := range aiResp.FunctionCalls {
 			switch fc.Name {
-			case "normalize_medications":
-				// Execute in backend (needs dictionary/RxNorm/AI)
+			case "normalize_medications", "save_guest_profile":
+				// Execute in backend
 				backendCalls = append(backendCalls, fc)
 			case "check_interactions":
 				// Signal for frontend — no data, frontend has the meds
 				frontendCalls = append(frontendCalls, toolcall.Result{
 					Name: fc.Name,
 					Data: nil,
-				})
-			case "select_mode":
-				// Signal for frontend with the selected mode
-				frontendCalls = append(frontendCalls, toolcall.Result{
-					Name: fc.Name,
-					Data: fc.Args,
 				})
 			default:
 				frontendCalls = append(frontendCalls, toolcall.Result{
@@ -168,7 +162,7 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 
 		// Execute backend calls
 		if len(backendCalls) > 0 {
-			results, err := h.executor.Execute(ctx, conv.ID, backendCalls)
+			results, err := h.executor.Execute(ctx, conv.ID, guestID, backendCalls)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "tool execution error"})
 				return
@@ -239,8 +233,8 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 
 func defaultMessageForToolCall(name string) string {
 	switch name {
-	case "select_mode":
-		return "¡Buenísimo! Continuemos con ese modo. Ahora decime, ¿cuáles son los medicamentos que estás tomando?"
+	case "save_guest_profile":
+		return "¡Dale! Contame, ¿qué medicamentos estás tomando?"
 	case "normalize_medications":
 		return "Perfecto, encontré estos medicamentos. ¿Son correctos?"
 	case "check_interactions":

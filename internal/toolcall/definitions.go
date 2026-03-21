@@ -9,18 +9,38 @@ func GetToolDefinitions() []*genai.Tool {
 		{
 			FunctionDeclarations: []*genai.FunctionDeclaration{
 				{
-					Name:        "select_mode",
-					Description: "Señala al frontend qué modo de interacción eligió el usuario",
+					Name:        "save_guest_profile",
+					Description: "Guarda la información personal del usuario recopilada durante el onboarding. Se llama cada vez que el usuario brinda datos personales como nombre, edad, condiciones, alergias, motivo de consulta o si es para él/ella u otra persona.",
 					Parameters: &genai.Schema{
 						Type: genai.TypeObject,
 						Properties: map[string]*genai.Schema{
-							"mode": {
+							"name": {
 								Type:        genai.TypeString,
-								Description: "Modo elegido: 'voice' para voz o 'text' para texto",
-								Enum:        []string{"voice", "text"},
+								Description: "Nombre del usuario",
+							},
+							"age": {
+								Type:        genai.TypeInteger,
+								Description: "Edad del usuario en años",
+							},
+							"conditions": {
+								Type:        genai.TypeArray,
+								Description: "Condiciones preexistentes (embarazo, diabetes, hipertensión, etc.) en español",
+								Items:       &genai.Schema{Type: genai.TypeString},
+							},
+							"allergies": {
+								Type:        genai.TypeArray,
+								Description: "Alergias conocidas a medicamentos en español",
+								Items:       &genai.Schema{Type: genai.TypeString},
+							},
+							"consultation_reason": {
+								Type:        genai.TypeString,
+								Description: "Motivo de la consulta (dolor de cabeza, gripe, etc.)",
+							},
+							"is_for_self": {
+								Type:        genai.TypeBoolean,
+								Description: "true si la consulta es para el propio usuario, false si es para otra persona",
 							},
 						},
-						Required: []string{"mode"},
 					},
 				},
 				{
