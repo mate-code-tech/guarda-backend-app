@@ -32,11 +32,11 @@ internal/
 │   └── upload.go                   # POST /upload/lab
 ├── service/
 │   ├── ai.go                       # Gemini chat + function calling
-│   ├── normalizer.go               # Normalización: diccionario → fuzzy → AI
-│   ├── interaction_checker.go      # PubChem → dataset → AI fallback
-│   ├── pubchem.go                  # Cliente PubChem API
+│   ├── normalizer.go               # Normalización: diccionario → RxNorm API → AI
+│   ├── interaction_checker.go      # CSV dataset → AI fallback
+│   ├── rxnorm.go                   # Cliente RxNorm API (normalización de nombres)
 │   ├── lab_parser.go               # OCR/Vision para análisis
-│   └── dataset.go                  # Carga CSV datasets argentinos
+│   └── dataset.go                  # Carga CSV: drug_dictionary + interactions (Kaggle DDI)
 ├── model/                          # Guest, Conversation, Message, Medication, Interaction
 ├── repository/                     # CRUD para cada modelo
 ├── toolcall/
@@ -46,7 +46,8 @@ internal/
 └── db/
     ├── postgres.go                 # Connection pool
     └── migrations/                 # 001-005 SQL files
-data/drug_dictionary.csv            # Diccionario local de medicamentos
+data/drug_dictionary.csv            # Diccionario marcas argentinas → INN
+data/drug_interactions.csv          # Kaggle DDI dataset (Drug 1, Drug 2, Interaction Description)
 .env                                # DB_URL, GEMINI_API_KEY, PORT
 Makefile
 ```
@@ -152,19 +153,30 @@ CREATE TABLE uploads (
 
 ## Normalización de Medicamentos (3 niveles)
 
-El objetivo es resolver cualquier input del usuario (marca comercial, nombre en español, typo) a un **nombre genérico PubChem-compatible** (INN en inglés: `ibuprofen`, `aspirin`, `acetaminophen`, etc.) para poder consultarlo en la API de PubChem.
+El objetivo es resolver cualquier input del usuario (marca comercial, nombre en español, typo) a un **nombre genérico INN** (en inglés: `ibuprofen`, `aspirin`, `acetaminophen`, etc.).
 
-1. **Diccionario** (rápido): CSV en memoria con mapeo marca/español → nombre PubChem, match case-insensitive sin acentos
-2. **Fuzzy match**: Levenshtein ≤ 2 contra diccionario → mismo mapeo a nombre PubChem
-3. **AI fallback**: Prompt al LLM pidiendo explícitamente el INN name en inglés que se usaría en PubChem
+1. **Diccionario local** (rápido): CSV en memoria con mapeo marca argentina/español → nombre INN, match case-insensitive sin acentos. Incluye ~50+ marcas argentinas comunes (Tafirol→acetaminophen, Bayaspirina→aspirin, Ibuevanol→ibuprofen, Amoxidal→amoxicillin, etc.)
+2. **RxNorm API** (fallback de normalización): `GET https://rxnav.nlm.nih.gov/REST/rxcui.json?name={name}&search=2` para resolver nombres INN internacionales. Soporta paracetamol, metamizole, diclofenac, etc. Sin API key, gratis, 20 req/s. Si no match exacto, usar approximate: `GET /REST/approximateTerm.json?term={term}&maxEntries=5`
+3. **AI fallback**: Prompt a Gemini pidiendo explícitamente el INN name en inglés
 
 ---
 
 ## Checker de Interacciones (3 niveles)
 
-1. **PubChem**: Resolver CID por nombre, consultar propiedades
-2. **Dataset argentino**: CSV con interacciones conocidas
-3. **AI fallback**: LLM clasifica severidad (`none`/`mild`/`moderate`/`severe`) → marcar `source: "ai_fallback"` + disclaimer
+> **NOTA:** La API de interacciones de NLM (rxnav.nlm.nih.gov/REST/interaction/) fue **discontinuada en enero 2024**. No existe dataset argentino de interacciones (ANMAT solo tiene catálogos de medicamentos).
+
+1. **Dataset CSV local**: Kaggle DDI (DrugBank v5.1, licencia Apache 2.0). Formato: `Drug 1, Drug 2, Interaction Description`. Fuente: https://www.kaggle.com/datasets/mghobashy/drug-drug-interactions. Se carga en memoria al iniciar el servidor. Búsqueda case-insensitive por nombre INN.
+2. **Gemini AI fallback**: Para pares de drogas no cubiertos por el CSV. El LLM clasifica severidad (`none`/`mild`/`moderate`/`severe`), describe la interacción y da recomendación. Marcar `source: "ai_fallback"` + disclaimer médico.
+
+### Flujo completo de interacciones:
+```
+Input usuario: "Tafirol" + "Bayaspirina"
+  1. Normalizar → diccionario local → acetaminophen + aspirin
+     (si no está: RxNorm API → si no: Gemini)
+  2. Buscar en CSV: (acetaminophen, aspirin) → match? → devolver descripción
+     (si no está: Gemini infiere interacción con severidad)
+  3. Responder con source: "dataset" o "ai_fallback"
+```
 
 ---
 
@@ -383,7 +395,7 @@ conversation_id: "uuid"
 | B8  | Function-call framework: declarations, executor, routing         | Function calls despachados           |
 | B9  | Normalización: diccionario, fuzzy, AI fallback                   | Tool normalize_medications funcional |
 | B10 | Medication handlers: validate + confirm                          | Flujo de validación completo         |
-| B11 | Interaction checker: PubChem, dataset, AI fallback               | Tool check_interactions funcional    |
+| B11 | Interaction checker: CSV dataset (Kaggle DDI), Gemini fallback   | Tool check_interactions funcional    |
 | B12 | File upload: multipart, storage, AI vision                       | Upload + extracción funcional        |
 | B13 | Testing E2E, error handling, CORS                                | Backend integrado                    |
 
@@ -410,7 +422,8 @@ conversation_id: "uuid"
 
 | Riesgo                                       | Mitigación                                                                  |
 | -------------------------------------------- | --------------------------------------------------------------------------- |
-| PubChem sin endpoint directo de interacciones | Usar para validar nombres, interacciones via dataset + AI                   |
+| API de interacciones NLM discontinuada (ene 2024) | Usar CSV Kaggle DDI como fuente primaria + Gemini fallback              |
+| No existe dataset argentino de interacciones  | Kaggle DDI (DrugBank v5.1) cubre interacciones genéricas internacionales    |
 | Rate limits de Gemini                        | Timeout 30s, retry exponencial, cachear normalizaciones                     |
 | Datasets argentinos incompletos              | Diccionario manual de 50+ marcas comunes como mínimo                        |
 | Loop de tool-calls                           | Cap en 5 rondas por mensaje                                                |
