@@ -2,7 +2,7 @@
 
 ## Context
 
-Hackathon biotech/health. App mobile-first llamada **Guarda** con un asistente conversacional (orbe animado) que detecta riesgos en combinaciones de medicamentos y cruza medicamentos con análisis clínicos. Backend en Go. Sin login, solo guest_id.
+Hackathon biotech/health. App mobile-first llamada **Guarda** con un asistente conversacional (orbe animado) que detecta riesgos en combinaciones de medicamentos. Backend en Go. Sin login, solo guest_id.
 
 **Nota:** El backend nunca recibe audio/voz. Toda la transcripción speech-to-text ocurre en el frontend (Web Speech API). El backend solo recibe texto plano.
 
@@ -13,6 +13,12 @@ Hackathon biotech/health. App mobile-first llamada **Guarda** con un asistente c
 Go 1.22+, `go mod init github.com/guarda/backend`.
 Deps: `gin-gonic/gin`, `jackc/pgx/v5`, `google/uuid`, `google/generative-ai-go` (Gemini SDK), `joho/godotenv`.
 
+```bash
+cp .env.example .env          # editar con GEMINI_API_KEY
+docker compose up -d           # PostgreSQL 16
+make run                       # servidor en :8080
+```
+
 ---
 
 ## Estructura de directorios
@@ -22,66 +28,56 @@ cmd/server/main.go                  # Entry point
 internal/
 ├── config/config.go                # Config desde env vars
 ├── middleware/
-│   ├── cors.go                     # CORS para frontend
+│   ├── cors.go                     # CORS permisivo para dev
 │   └── guest.go                    # Extraer X-Guest-ID, validar
 ├── handler/
 │   ├── guest.go                    # POST /guests
 │   ├── chat.go                     # POST /chat/message (JSON)
-│   ├── medication.go               # POST /medications/validate, /confirm
-│   ├── interaction.go              # POST /interactions/check
-│   └── upload.go                   # POST /upload/lab
+│   └── interaction.go              # POST /interactions/check
 ├── service/
-│   ├── ai.go                       # Gemini chat + function calling
+│   ├── ai.go                       # Gemini chat + function calling + system prompt
 │   ├── normalizer.go               # Normalización: diccionario → RxNorm API → AI
 │   ├── interaction_checker.go      # CSV dataset → AI fallback
 │   ├── rxnorm.go                   # Cliente RxNorm API (normalización de nombres)
-│   ├── lab_parser.go               # OCR/Vision para análisis
 │   └── dataset.go                  # Carga CSV: drug_dictionary + interactions (Kaggle DDI)
-├── model/                          # Guest, Conversation, Message, Medication, Interaction
+├── model/                          # Guest, Conversation, Message, Interaction
 ├── repository/                     # CRUD para cada modelo
 ├── toolcall/
-│   ├── definitions.go              # Schemas de tools para Gemini
-│   ├── executor.go                 # Despachar tool_call → handler
-│   └── handlers.go                 # Handlers individuales
+│   ├── definitions.go              # Schemas de tools para Gemini (select_mode, normalize, check)
+│   └── executor.go                 # Despachar tool_call → handler o señal frontend
 └── db/
-    ├── postgres.go                 # Connection pool
-    └── migrations/                 # 001-005 SQL files
-data/drug_dictionary.csv            # Diccionario marcas argentinas → INN
-data/drug_interactions.csv          # Kaggle DDI dataset (Drug 1, Drug 2, Interaction Description)
+    ├── postgres.go                 # Connection pool + migration runner
+    └── migrations/001_create_tables.sql
+data/drug_dictionary.csv            # Diccionario marcas argentinas → INN (~50 entries)
+data/drug_interactions.csv          # Kaggle DDI dataset (usuario lo provee)
 .env                                # DB_URL, GEMINI_API_KEY, PORT
 Makefile
+docker-compose.yml
 ```
 
 ---
 
 ## Endpoints
 
-| Método | Ruta                             | Descripción                        |
-| ------ | -------------------------------- | ---------------------------------- |
-| POST   | `/api/v1/guests`                 | Registrar guest                    |
-| POST   | `/api/v1/chat/message`           | Enviar mensaje, respuesta JSON       |
-| POST   | `/api/v1/medications/validate`   | Normalizar nombres de medicamentos |
-| POST   | `/api/v1/medications/confirm`    | Confirmar medicamentos validados   |
-| POST   | `/api/v1/interactions/check`     | Ejecutar cruce de interacciones    |
-| POST   | `/api/v1/upload/lab`             | Subir análisis clínico             |
-| GET    | `/api/v1/conversations/:id`      | Historial de conversación          |
-
-Todos requieren header `X-Guest-ID` (excepto `POST /guests`).
+| Método | Ruta                           | Auth        | Descripción                     |
+| ------ | ------------------------------ | ----------- | ------------------------------- |
+| POST   | `/api/v1/guests`               | No          | Registrar guest                 |
+| POST   | `/api/v1/chat/message`         | X-Guest-ID  | Enviar mensaje, respuesta JSON  |
+| POST   | `/api/v1/interactions/check`   | X-Guest-ID  | Cruce de interacciones          |
+| GET    | `/health`                      | No          | Health check                    |
 
 ---
 
 ## Schema PostgreSQL
 
 ```sql
--- guests
-CREATE TABLE guests (
+CREATE TABLE IF NOT EXISTS guests (
     id UUID PRIMARY KEY,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     preferred_mode TEXT NOT NULL DEFAULT 'text'
 );
 
--- conversations
-CREATE TABLE conversations (
+CREATE TABLE IF NOT EXISTS conversations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     guest_id UUID NOT NULL REFERENCES guests(id),
     flow_type TEXT NOT NULL DEFAULT 'general',
@@ -90,8 +86,7 @@ CREATE TABLE conversations (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- messages
-CREATE TABLE messages (
+CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     conversation_id UUID NOT NULL REFERENCES conversations(id),
     role TEXT NOT NULL,
@@ -101,18 +96,7 @@ CREATE TABLE messages (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- medications
-CREATE TABLE medications (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    conversation_id UUID NOT NULL REFERENCES conversations(id),
-    input_name TEXT NOT NULL,
-    generic_name TEXT NOT NULL,
-    confirmed BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- interactions
-CREATE TABLE interactions (
+CREATE TABLE IF NOT EXISTS interactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     conversation_id UUID NOT NULL REFERENCES conversations(id),
     drug_a TEXT NOT NULL,
@@ -123,60 +107,81 @@ CREATE TABLE interactions (
     source TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
--- uploads
-CREATE TABLE uploads (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    conversation_id UUID NOT NULL REFERENCES conversations(id),
-    filename TEXT NOT NULL,
-    content_type TEXT NOT NULL,
-    file_path TEXT NOT NULL,
-    extracted_data JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 ```
 
 ---
 
-## Flujo de Chat (core)
+## Flujo conversacional completo
 
-1. Handler recibe mensaje → guarda en DB
-2. Carga historial completo de conversación
-3. Envía a Gemini con function declarations
-4. Si hay function calls → ejecutar via executor → guardar resultado como function response → volver a paso 3
-5. Si es mensaje normal → construir JSON response con message + tool_calls
-6. Guardar mensaje del asistente en DB
-7. Devolver JSON al cliente (HTTP 200)
-8. Cap de **5 rondas** de tool-calls para evitar loops
+El chat es AI-driven. Gemini controla el flujo via tool_calls que actúan como **señales para el frontend**. Solo `normalize_medications` se ejecuta en el backend.
+
+### Paso 1: Bienvenida
+```
+User: "hola"
+→ AI responde con texto: "¡Hola! Soy Guarda... ¿Cómo preferís interactuar, por voz o por texto?"
+→ tool_calls: []
+```
+
+### Paso 2: Selección de modo
+```
+User: "por voz"
+→ AI responde con mensaje breve
+→ tool_calls: [{ "name": "select_mode", "data": { "mode": "voice" } }]
+Frontend: activa modo voz
+```
+
+### Paso 3: Menciona medicamentos
+```
+User: "tomo tafirol y buscapina"
+→ Backend ejecuta normalize_medications (diccionario → RxNorm → AI)
+→ tool_calls: [{ "name": "normalize_medications", "data": { "medications": [...] } }]
+→ message: texto del AI explicando lo que encontró
+Frontend: muestra lista de medicamentos normalizados para confirmar
+```
+
+### Paso 4: Confirma medicamentos
+```
+User: "sí, están bien"
+→ AI llama check_interactions como señal (NO se ejecuta en backend)
+→ tool_calls: [{ "name": "check_interactions", "data": null }]
+→ message: ""
+Frontend: usa los meds que ya tiene → pega a POST /interactions/check
+```
+
+### Reglas del AI
+- **Máximo UNA función por respuesta**
+- `select_mode` se llama UNA SOLA VEZ en toda la conversación
+- NUNCA llama `normalize_medications` y `check_interactions` juntas
+- Cap de **5 rondas** de tool-calls para evitar loops
+
+---
+
+## Tool calls (Gemini function declarations)
+
+| Tool                    | Ejecuta en backend | Descripción                                         |
+| ----------------------- | ------------------ | --------------------------------------------------- |
+| `select_mode`           | No (señal)         | Indica al frontend el modo elegido (voice/text)     |
+| `normalize_medications` | Sí                 | Normaliza nombres a INN via diccionario/RxNorm/AI   |
+| `check_interactions`    | No (señal)         | Indica al frontend que ejecute el chequeo           |
 
 ---
 
 ## Normalización de Medicamentos (3 niveles)
 
-El objetivo es resolver cualquier input del usuario (marca comercial, nombre en español, typo) a un **nombre genérico INN** (en inglés: `ibuprofen`, `aspirin`, `acetaminophen`, etc.).
+El objetivo es resolver cualquier input (marca, español, typo) a un **nombre genérico INN** en inglés.
 
-1. **Diccionario local** (rápido): CSV en memoria con mapeo marca argentina/español → nombre INN, match case-insensitive sin acentos. Incluye ~50+ marcas argentinas comunes (Tafirol→acetaminophen, Bayaspirina→aspirin, Ibuevanol→ibuprofen, Amoxidal→amoxicillin, etc.)
-2. **RxNorm API** (fallback de normalización): `GET https://rxnav.nlm.nih.gov/REST/rxcui.json?name={name}&search=2` para resolver nombres INN internacionales. Soporta paracetamol, metamizole, diclofenac, etc. Sin API key, gratis, 20 req/s. Si no match exacto, usar approximate: `GET /REST/approximateTerm.json?term={term}&maxEntries=5`
-3. **AI fallback**: Prompt a Gemini pidiendo explícitamente el INN name en inglés
+1. **Diccionario local + fuzzy** (rápido): CSV en memoria con mapeo marca argentina → INN. Match case-insensitive sin acentos. Fuzzy matching con Levenshtein (distancia ≤ 2) y prefix match. ~50+ marcas argentinas.
+2. **RxNorm API** (fallback): `GET https://rxnav.nlm.nih.gov/REST/rxcui.json?name={name}&search=2`. Sin API key, gratis, 20 req/s. Si no match exacto → approximate search.
+3. **AI fallback**: Prompt a Gemini con ejemplos de typos argentinos. Devuelve "UNKNOWN" si no puede identificar.
 
 ---
 
-## Checker de Interacciones (3 niveles)
+## Checker de Interacciones (2 niveles)
 
-> **NOTA:** La API de interacciones de NLM (rxnav.nlm.nih.gov/REST/interaction/) fue **discontinuada en enero 2024**. No existe dataset argentino de interacciones (ANMAT solo tiene catálogos de medicamentos).
+> **NOTA:** La API de interacciones de NLM fue discontinuada en enero 2024.
 
-1. **Dataset CSV local**: Kaggle DDI (DrugBank v5.1, licencia Apache 2.0). Formato: `Drug 1, Drug 2, Interaction Description`. Fuente: https://www.kaggle.com/datasets/mghobashy/drug-drug-interactions. Se carga en memoria al iniciar el servidor. Búsqueda case-insensitive por nombre INN.
-2. **Gemini AI fallback**: Para pares de drogas no cubiertos por el CSV. El LLM clasifica severidad (`none`/`mild`/`moderate`/`severe`), describe la interacción y da recomendación. Marcar `source: "ai_fallback"` + disclaimer médico.
-
-### Flujo completo de interacciones:
-```
-Input usuario: "Tafirol" + "Bayaspirina"
-  1. Normalizar → diccionario local → acetaminophen + aspirin
-     (si no está: RxNorm API → si no: Gemini)
-  2. Buscar en CSV: (acetaminophen, aspirin) → match? → devolver descripción
-     (si no está: Gemini infiere interacción con severidad)
-  3. Responder con source: "dataset" o "ai_fallback"
-```
+1. **Dataset CSV local**: Kaggle DDI (DrugBank v5.1). Formato: `Drug 1, Drug 2, Interaction Description`. Búsqueda bidireccional case-insensitive por nombre INN. Clasificación de severidad por heurística de keywords.
+2. **Gemini AI fallback**: Clasifica severidad (`none`/`mild`/`moderate`/`severe`), describe interacción y da recomendación. Source: `"ai_fallback"`.
 
 ---
 
@@ -186,7 +191,7 @@ Input usuario: "Tafirol" + "Bayaspirina"
 
 - `X-Guest-ID: <uuid>` en toda request (excepto `POST /guests`)
 
-### Endpoints — Request / Response completos
+### Endpoints — Request / Response
 
 ---
 
@@ -208,40 +213,45 @@ Input usuario: "Tafirol" + "Bayaspirina"
 
 ---
 
-#### `POST /api/v1/chat/message` — Enviar mensaje, respuesta JSON
+#### `POST /api/v1/chat/message` — Enviar mensaje
 
 **Request:**
 ```json
-{ "conversation_id": "uuid | null", "message": "Tomo ibuprofeno y aspirina" }
+{ "conversation_id": "uuid | null", "message": "texto del usuario" }
 ```
 
-**Response:** `200`
+`conversation_id` es `null` en el primer mensaje. El backend crea la conversación y devuelve el ID.
+
+**Response (con texto):** `200`
 ```json
 {
   "conversation_id": "uuid",
-  "message": "Veo que mencionás dos medicamentos...",
+  "message": "¡Hola! Soy Guarda...",
+  "tool_calls": []
+}
+```
+
+**Response (con select_mode):** `200`
+```json
+{
+  "conversation_id": "uuid",
+  "message": "¡Dale, vamos por voz!",
+  "tool_calls": [{ "name": "select_mode", "data": { "mode": "voice" } }]
+}
+```
+
+**Response (con normalize_medications):** `200`
+```json
+{
+  "conversation_id": "uuid",
+  "message": "Encontré estos medicamentos...",
   "tool_calls": [
     {
       "name": "normalize_medications",
       "data": {
         "medications": [
-          { "input_name": "ibuprofeno", "generic_name": "ibuprofen" },
-          { "input_name": "aspirina", "generic_name": "aspirin" }
-        ]
-      }
-    },
-    {
-      "name": "check_interactions",
-      "data": {
-        "results": [
-          {
-            "drug_a": "ibuprofen",
-            "drug_b": "aspirin",
-            "severity": "severe",
-            "description": "Aumenta riesgo de sangrado GI",
-            "recommendation": "No combinar sin supervisión médica",
-            "source": "dataset"
-          }
+          { "input_name": "tafirol", "generic_name": "acetaminophen" },
+          { "input_name": "buscapina", "generic_name": "hyoscine" }
         ]
       }
     }
@@ -249,51 +259,16 @@ Input usuario: "Tafirol" + "Bayaspirina"
 }
 ```
 
-`tool_calls` es un array (puede estar vacío). El backend resuelve todos los tool-calls internamente (loop Gemini) antes de responder.
-
----
-
-#### `POST /api/v1/medications/validate` — Normalizar nombres
-
-**Request:**
+**Response (con check_interactions — señal):** `200`
 ```json
 {
   "conversation_id": "uuid",
-  "medications": ["ibuprofeno", "Tafirol", "bayaspirina"]
+  "message": "",
+  "tool_calls": [{ "name": "check_interactions", "data": null }]
 }
 ```
 
-**Response:** `200`
-```json
-{
-  "medications": [
-    { "input_name": "ibuprofeno", "generic_name": "ibuprofen" },
-    { "input_name": "Tafirol", "generic_name": "acetaminophen" },
-    { "input_name": "bayaspirina", "generic_name": "aspirin" }
-  ]
-}
-```
-
----
-
-#### `POST /api/v1/medications/confirm` — Confirmar medicamentos
-
-**Request:**
-```json
-{
-  "conversation_id": "uuid",
-  "medications": [
-    { "generic_name": "ibuprofen" },
-    { "generic_name": "acetaminophen" },
-    { "generic_name": "aspirin" }
-  ]
-}
-```
-
-**Response:** `200`
-```json
-{ "confirmed": true, "count": 3 }
-```
+El frontend recibe `check_interactions` → usa los meds que ya tiene del paso anterior → pega a `POST /interactions/check`.
 
 ---
 
@@ -303,7 +278,7 @@ Input usuario: "Tafirol" + "Bayaspirina"
 ```json
 {
   "conversation_id": "uuid",
-  "medications": ["ibuprofen", "aspirin", "acetaminophen"]
+  "medications": ["acetaminophen", "hyoscine"]
 }
 ```
 
@@ -312,130 +287,42 @@ Input usuario: "Tafirol" + "Bayaspirina"
 {
   "results": [
     {
-      "drug_a": "ibuprofen",
-      "drug_b": "aspirin",
-      "severity": "severe",
-      "description": "Aumenta riesgo de sangrado gastrointestinal",
-      "recommendation": "No combinar sin supervisión médica",
-      "source": "dataset"
-    },
-    {
-      "drug_a": "ibuprofen",
-      "drug_b": "acetaminophen",
-      "severity": "mild",
-      "description": "Combinación generalmente segura en dosis terapéuticas",
-      "recommendation": "Monitorear dosis total diaria",
-      "source": "ai_fallback"
+      "drug_a": "acetaminophen",
+      "drug_b": "hyoscine",
+      "severity": "none",
+      "description": "No se encontraron interacciones conocidas.",
+      "recommendation": "Si tiene dudas, consulte con su médico.",
+      "source": "none"
     }
   ]
 }
 ```
 
 Severidades posibles: `none`, `mild`, `moderate`, `severe`.
-
----
-
-#### `POST /api/v1/upload/lab` — Subir análisis clínico
-
-**Request:** `multipart/form-data`
-```
-file: <archivo PDF/imagen>
-conversation_id: "uuid"
-```
-
-**Response:** `200`
-```json
-{
-  "id": "uuid",
-  "filename": "analisis_sangre.pdf",
-  "extracted_data": {
-    "hemoglobina": { "value": 14.2, "unit": "g/dL", "reference": "12-16" },
-    "glucemia": { "value": 110, "unit": "mg/dL", "reference": "70-100" },
-    "creatinina": { "value": 1.1, "unit": "mg/dL", "reference": "0.7-1.3" }
-  }
-}
-```
-
----
-
-#### `GET /api/v1/conversations/:id` — Historial de conversación
-
-**Request:** solo header `X-Guest-ID`
-
-**Response:** `200`
-```json
-{
-  "id": "uuid",
-  "guest_id": "uuid",
-  "flow_type": "general",
-  "status": "active",
-  "created_at": "...",
-  "messages": [
-    { "id": "uuid", "role": "user", "content": "Tomo ibuprofeno", "created_at": "..." },
-    { "id": "uuid", "role": "assistant", "content": "Veo que...", "tool_calls": [...], "created_at": "..." }
-  ],
-  "medications": [...],
-  "interactions": [...]
-}
-```
-
----
-
-## Tareas (ordenadas)
-
-| #   | Tarea                                                            | Entregable                           |
-| --- | ---------------------------------------------------------------- | ------------------------------------ |
-| B1  | Project init: go mod, deps, estructura, Makefile                 | Proyecto compilable                  |
-| B2  | Config + DB: config.go, postgres.go, pool                        | DB conectada                         |
-| B3  | Migraciones SQL                                                  | Schema creado en PostgreSQL          |
-| B4  | Guest handler + middleware                                       | Registro y auth de guests            |
-| B5  | Models + repositories: structs y CRUD                            | Capa de datos completa               |
-| B6  | Chat handler: JSON response (echo para testing)                  | Endpoint chat funcional              |
-| B7  | AI service: Gemini SDK + function calling                        | IA responde mensajes                 |
-| B8  | Function-call framework: declarations, executor, routing         | Function calls despachados           |
-| B9  | Normalización: diccionario, fuzzy, AI fallback                   | Tool normalize_medications funcional |
-| B10 | Medication handlers: validate + confirm                          | Flujo de validación completo         |
-| B11 | Interaction checker: CSV dataset (Kaggle DDI), Gemini fallback   | Tool check_interactions funcional    |
-| B12 | File upload: multipart, storage, AI vision                       | Upload + extracción funcional        |
-| B13 | Testing E2E, error handling, CORS                                | Backend integrado                    |
-
-### Paralelización
-
-- B5 y B6 en paralelo
-- B9 y B11 son servicios independientes
-- B12 totalmente independiente
-
-### Orden sugerido para demo rápida
-
-1. Scaffolding (B1-B3)
-2. Guest system (B4)
-3. Chat E2E con AI real (B5-B7) ← **primer milestone**
-4. Tool-calls + normalización (B8-B10)
-5. Interaction checking (B11)
-6. File upload (B12)
-7. Polish y testing (B13)
-
+Sources posibles: `dataset`, `ai_fallback`, `none`.
 
 ---
 
 ## Riesgos y Mitigaciones
 
-| Riesgo                                       | Mitigación                                                                  |
-| -------------------------------------------- | --------------------------------------------------------------------------- |
-| API de interacciones NLM discontinuada (ene 2024) | Usar CSV Kaggle DDI como fuente primaria + Gemini fallback              |
-| No existe dataset argentino de interacciones  | Kaggle DDI (DrugBank v5.1) cubre interacciones genéricas internacionales    |
-| Rate limits de Gemini                        | Timeout 30s, retry exponencial, cachear normalizaciones                     |
-| Datasets argentinos incompletos              | Diccionario manual de 50+ marcas comunes como mínimo                        |
-| Loop de tool-calls                           | Cap en 5 rondas por mensaje                                                |
+| Riesgo                                            | Mitigación                                                              |
+| ------------------------------------------------- | ----------------------------------------------------------------------- |
+| API de interacciones NLM discontinuada (ene 2024) | CSV Kaggle DDI como fuente primaria + Gemini fallback                   |
+| No existe dataset argentino de interacciones       | Kaggle DDI cubre interacciones genéricas internacionales                |
+| Rate limits / quota de Gemini                      | Fallback a echo mode cuando AI no disponible                            |
+| Datasets argentinos incompletos                    | Diccionario manual 50+ marcas + fuzzy matching + AI fallback            |
+| Loop de tool-calls                                 | Cap en 5 rondas por mensaje                                            |
+| Typos del usuario                                  | Levenshtein (dist ≤ 2) + prefix match + AI normalization               |
 
 ---
 
 ## Verificación
 
-- [ ] Guest se crea y persiste con UUID
-- [ ] Chat E2E: recibir mensaje → respuesta JSON completa con message + tool_calls
-- [ ] Decir medicamentos → normalización 3 niveles → confirmar → guardar en DB
-- [ ] Cruce de interacciones → semáforo de severidad
-- [ ] Subir análisis → extracción via AI vision → cruce con medicamentos
-- [ ] CORS configurado correctamente para frontend
-- [ ] Error handling consistente en todos los endpoints
+1. `docker compose up -d` → PostgreSQL levanta
+2. `make run` → servidor en :8080
+3. `POST /api/v1/guests` → guest creado con UUID
+4. `POST /api/v1/chat/message` con "hola" → AI saluda y pregunta modo
+5. `POST /api/v1/chat/message` con "por voz" → tool_call `select_mode` con `voice`
+6. `POST /api/v1/chat/message` con "tomo tafirol y buscapina" → tool_call `normalize_medications`
+7. `POST /api/v1/chat/message` con "sí, están bien" → tool_call `check_interactions` (señal)
+8. `POST /api/v1/interactions/check` con `["acetaminophen", "hyoscine"]` → resultados
