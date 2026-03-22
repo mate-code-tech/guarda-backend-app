@@ -73,6 +73,14 @@ func GetToolDefinitions() []*genai.Tool {
 						Required: []string{"medications"},
 					},
 				},
+				{
+					Name:        "end_conversation",
+					Description: "Señal para que el frontend termine la conversación y muestre la pantalla de despedida con botón para volver al inicio.",
+					Parameters: &genai.Schema{
+						Type:       genai.TypeObject,
+						Properties: map[string]*genai.Schema{},
+					},
+				},
 			},
 		},
 	}

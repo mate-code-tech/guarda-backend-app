@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -15,23 +16,26 @@ import (
 )
 
 type ChatHandler struct {
-	convRepo *repository.ConversationRepo
-	msgRepo  *repository.MessageRepo
-	ai       *service.AIService
-	executor *toolcall.Executor
+	convRepo  *repository.ConversationRepo
+	msgRepo   *repository.MessageRepo
+	guestRepo *repository.GuestRepo
+	ai        *service.AIService
+	executor  *toolcall.Executor
 }
 
 func NewChatHandler(
 	convRepo *repository.ConversationRepo,
 	msgRepo *repository.MessageRepo,
+	guestRepo *repository.GuestRepo,
 	ai *service.AIService,
 	executor *toolcall.Executor,
 ) *ChatHandler {
 	return &ChatHandler{
-		convRepo: convRepo,
-		msgRepo:  msgRepo,
-		ai:       ai,
-		executor: executor,
+		convRepo:  convRepo,
+		msgRepo:   msgRepo,
+		guestRepo: guestRepo,
+		ai:        ai,
+		executor:  executor,
 	}
 }
 
@@ -79,6 +83,32 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		if err := h.convRepo.Create(ctx, conv); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create conversation"})
 			return
+		}
+	}
+
+	// If this is a new conversation, inject guest profile context so the AI knows the user
+	if req.ConversationID == nil || *req.ConversationID == "" {
+		guest, _ := h.guestRepo.GetByID(ctx, guestID)
+		if guest != nil && guest.Name != nil && *guest.Name != "" {
+			var parts []string
+			parts = append(parts, "El usuario ya se presentó antes. Se llama "+*guest.Name+".")
+			if guest.Age != nil {
+				parts = append(parts, fmt.Sprintf("Tiene %d años.", *guest.Age))
+			}
+			if len(guest.Conditions) > 0 {
+				parts = append(parts, "Condiciones: "+strings.Join(guest.Conditions, ", ")+".")
+			}
+			if len(guest.Allergies) > 0 {
+				parts = append(parts, "Alergias: "+strings.Join(guest.Allergies, ", ")+".")
+			}
+			parts = append(parts, "NO le preguntes estos datos de nuevo. Saludalo por su nombre y preguntale directamente qué medicamentos está tomando.")
+			profileCtx := strings.Join(parts, " ")
+			profileMsg := &model.Message{
+				ConversationID: conv.ID,
+				Role:           "user",
+				Content:        &profileCtx,
+			}
+			h.msgRepo.Create(ctx, profileMsg)
 		}
 	}
 
@@ -234,9 +264,9 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 func defaultMessageForToolCall(name string) string {
 	switch name {
 	case "save_guest_profile":
-		return "¡Dale! Contame, ¿qué medicamentos estás tomando?"
+		return "¡Anotado! Dale, contame qué medicamentos estás tomando."
 	case "normalize_medications":
-		return "Perfecto, encontré estos medicamentos. ¿Son correctos?"
+		return "¿Son estos los que tomás? ¿Querés agregar alguno más?"
 	case "check_interactions":
 		return "¡Dale! Esperame un segundito mientras analizo las interacciones entre tus medicamentos..."
 	default:

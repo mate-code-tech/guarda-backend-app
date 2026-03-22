@@ -64,7 +64,7 @@ func main() {
 
 	// Initialize handlers
 	guestHandler := handler.NewGuestHandler(guestRepo)
-	chatHandler := handler.NewChatHandler(convRepo, msgRepo, aiService, executor)
+	chatHandler := handler.NewChatHandler(convRepo, msgRepo, guestRepo, aiService, executor)
 	interHandler := handler.NewInteractionHandler(interRepo, checker, guestRepo)
 
 	// Setup router
